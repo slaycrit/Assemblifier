@@ -32,7 +32,7 @@ namespace Assemblifier
         /// <summary>
         /// List of Prefixes (C, IC, Etc.) to Filter Parts for Assembly, use all Parts when this array is empty
         /// </summary>
-        static string[] Prefixes;
+        static string[] Prefixes = new string[0];
 
         /// <summary>
         /// Targeted Service (Board Manufacturer)
@@ -74,7 +74,7 @@ namespace Assemblifier
                     {
                         case "prefix": //Component Name Filter
                             Prefixes = split[1].Split(',');
-                            Console.WriteLine($"ARGS: Prefixes Set ({Prefixes})");
+                            Console.WriteLine($"ARGS: Prefixes Set ({string.Join(',', Prefixes)})");
                             break;
 
                         case "service": //Target Manufacturer Service
@@ -96,6 +96,8 @@ namespace Assemblifier
             //Set Output File Etc based on Parameters
             OutputDirectory = Environment.CurrentDirectory + "/" + TargetService.ToString() + "/";
 
+            Console.WriteLine("\nReading CAM Output Archive");
+
             //Find newest Manufacturing Output (Eagle CAM Output), should be inside the Working Directory
             FileInfo archiveFile = null;
             foreach(FileInfo file in new DirectoryInfo(Environment.CurrentDirectory).GetFiles())
@@ -115,25 +117,26 @@ namespace Assemblifier
             MemoryStream pnpBackStream = null;
             try
             {
-                using (ZipFile zip = ZipFile.Read(archiveFile.Name))
+                using ZipFile zip = ZipFile.Read(archiveFile.Name);
+                foreach (ZipEntry entry in zip)
                 {
-                    foreach(ZipEntry entry in zip)
+                    if (entry.FileName.EndsWith("BOM.csv"))
                     {
-                        if(entry.FileName == "BOM.csv")
-                        {
-                            bomStream = new MemoryStream();
-                            entry.Extract(bomStream);
-                        }
-                        else if(entry.FileName == "PnP_front.csv")
-                        {
-                            pnpFrontStream = new MemoryStream();
-                            entry.Extract(pnpFrontStream);
-                        }
-                        else if(entry.FileName == "PnP_back.csv")
-                        {
-                            pnpBackStream = new MemoryStream();
-                            entry.Extract(pnpBackStream);
-                        }
+                        bomStream = new MemoryStream();
+                        entry.Extract(bomStream);
+                        PrintInfo("BOM Stream extracted");
+                    }
+                    else if (entry.FileName.EndsWith("PnP_front.csv"))
+                    {
+                        pnpFrontStream = new MemoryStream();
+                        entry.Extract(pnpFrontStream);
+                        PrintInfo("PnP Front Stream extracted");
+                    }
+                    else if (entry.FileName.EndsWith("PnP_back.csv"))
+                    {
+                        pnpBackStream = new MemoryStream();
+                        entry.Extract(pnpBackStream);
+                        PrintInfo("PnP Back Stream extracted");
                     }
                 }
             }
@@ -143,81 +146,138 @@ namespace Assemblifier
                 return; //EXIT
             }
 
+            Console.WriteLine("\nBill Of Materials");
+
             //Compile BOM Data
             if (bomStream == null) PrintWarning("No BOM Data found in CAM Output, continue to Skip", true);
             else
             {
-                using (XLWorkbook wb = new XLWorkbook())
+                using XLWorkbook wb = new XLWorkbook();
+                IXLWorksheet ws = wb.AddWorksheet("Sheet1");
+
+                //Write Header
+                ws.Cell("A1").Value = "Comment";
+                ws.Cell("B1").Value = "Designator";
+                ws.Cell("C1").Value = "Footprint";
+                ws.Cell("D1").Value = "LCSC Part #（optional)";
+                ws.Range("A1:D1").Style.Fill.BackgroundColor = XLColor.Yellow;
+
+                //Write Parts (By Values)
+                bomStream.Position = 0;
+                StreamReader reader = new StreamReader(bomStream, System.Text.Encoding.UTF8, true);
+
+                int partNumberIndex = -1;
+                int lineCounter = 0;
+                int outputFilePosition = 1;
+                while (!reader.EndOfStream)
                 {
-                    IXLWorksheet ws = wb.AddWorksheet("Sheet1");
-                    StreamReader reader = new StreamReader(bomStream);
+                    //Read next Entry
+                    string[] attributes = reader.ReadLine().Replace("\"", string.Empty).Split(';');
+                    lineCounter++;
 
-                    //Write Header
-                    ws.Cell("A1").Value = "Comment";
-                    ws.Cell("B1").Value = "Designator";
-                    ws.Cell("C1").Value = "Footprint";
-                    ws.Cell("D1").Value = "LCSC Part #（optional";
-                    var rngHeader = ws.Range("A1:D1");
-                    rngHeader.Style.Fill.BackgroundColor = XLColor.Yellow;
-
-                    //Write Parts (By Values)
-
-                    //Visual Flair
-                    ws.RangeUsed().Style.Border.OutsideBorder = XLBorderStyleValues.Hair;
-
-                    //Save to File
-                    try
+                    if (lineCounter == 1)
                     {
-                        wb.SaveAs(OutputDirectory + "BOM.xlsx");
+                        //CSV Header, Extract Attribute Position
+                        for (int index = 0; index < attributes.Length; index++) 
+                        {
+                            if (attributes[index] == "LCSC")
+                            {
+                                partNumberIndex = index;
+                                break;
+                            }
+                        }
+                        if (partNumberIndex == -1) PrintError("LCSC Part Attribute not found in the BOM");
                     }
-                    catch (Exception e)
+                    else
                     {
-                        PrintError($"File Error while Writing to BOM Output File\n{e.Message}");
-                        return; //EXIT
-                    }
+                        //Important Fields of the CSV
+                        string value = attributes[1];
+                        string designators = attributes[4];
+                        string footprint = attributes[3];
+                        string partNumber = attributes[partNumberIndex];
 
-                    PrintInfo("BOM Output File Saved to Ouput Directory");
+                        //Check if Part is contained in the Prefixes Array
+                        bool usePart = false;
+                        if (Prefixes.Length == 0) usePart = true;
+                        else foreach (string prefix in Prefixes) if (designators.StartsWith(prefix)) usePart = true;
+
+                        if (usePart && !string.IsNullOrEmpty(partNumber))
+                        {
+                            //Add the Entry to the Output File
+                            outputFilePosition++;
+                            ws.Cell($"A{outputFilePosition}").Value = value;
+                            ws.Cell($"B{outputFilePosition}").Value = designators;
+                            ws.Cell($"C{outputFilePosition}").Value = footprint;
+                            ws.Cell($"D{outputFilePosition}").Value = partNumber;
+                        }
+                        else if (string.IsNullOrEmpty(partNumber)) PrintWarning($"Designator(s) \"{designators}\" skipped (PartNumber Missing)", true);
+                        else PrintInfo($"Designator(s) \"{designators}\" skipped (not in the Prefix Filtering List)");
+                    }
                 }
+
+                //Visual Flair
+                for (int c = 1; c <= 4; c++) ws.Column(c).Width = 25;
+                foreach (var cell in ws.RangeUsed().Cells())
+                {
+                    cell.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+                }
+
+                //Save to File
+                try
+                {
+                    wb.SaveAs(OutputDirectory + "BOM.xlsx");
+                }
+                catch (Exception e)
+                {
+                    PrintError($"File Error while Writing to BOM Output File\n{e.Message}");
+                    return; //EXIT
+                }
+
+                PrintInfo("BOM Output File Saved to Ouput Directory");
             }
+
+            Console.WriteLine("\nPick and Place Data");
 
             //Compile PnP Data
             if (pnpFrontStream == null && pnpBackStream == null) PrintWarning("No PnP Data found in CAM Output, continue to skip", true);
-            else if (pnpFrontStream == null ^ pnpBackStream == null) PrintWarning("Only one PnP Side present, other side will be skipped");
             else
             {
-                using (XLWorkbook wb = new XLWorkbook())
+                if(pnpFrontStream == null ^ pnpBackStream == null) PrintWarning("Only one PnP Side present, other side will be skipped");
+
+                using XLWorkbook wb = new XLWorkbook();
+                IXLWorksheet ws = wb.AddWorksheet("Sheet1");
+                StreamReader reader = new StreamReader(bomStream);
+
+                //Write Header
+                ws.Cell("A1").Value = "Designator";
+                ws.Cell("B1").Value = "Mid X";
+                ws.Cell("C1").Value = "Mid Y";
+                ws.Cell("D1").Value = "Layer";
+                ws.Cell("E1").Value = "Rotation";
+                ws.Range("A1:E1").Style.Fill.BackgroundColor = XLColor.Yellow;
+
+                //Write Parts (By Designators)
+
+
+                //Visual Flair
+                for (int c = 1; c <= 5; c++) ws.Column(c).Width = 25;
+                foreach (var cell in ws.RangeUsed().Cells())
                 {
-                    IXLWorksheet ws = wb.AddWorksheet("Sheet1");
-                    StreamReader reader = new StreamReader(bomStream);
-
-                    //Write Header
-                    ws.Cell("A1").Value = "Designator";
-                    ws.Cell("B1").Value = "Mid X";
-                    ws.Cell("C1").Value = "Mid Y";
-                    ws.Cell("D1").Value = "Layer";
-                    ws.Cell("E1").Value = "Rotation";
-                    var rngHeader = ws.Range("A1:E1");
-                    rngHeader.Style.Fill.BackgroundColor = XLColor.Yellow;
-
-                    //Write Parts (By Designators)
-
-
-                    //Visual Flair
-                    ws.RangeUsed().Style.Border.OutsideBorder = XLBorderStyleValues.Hair;
-
-                    //Save to File
-                    try
-                    {
-                        wb.SaveAs(OutputDirectory + "CPL.xlsx");
-                    }
-                    catch (Exception e)
-                    {
-                        PrintError($"File Error while Writing to CPL Output File\n{e.Message}");
-                        return; //EXIT
-                    }
-
-                    PrintInfo("CPL Output File Saved to Ouput Directory");
+                    cell.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
                 }
+
+                //Save to File
+                try
+                {
+                    wb.SaveAs(OutputDirectory + "CPL.xlsx");
+                }
+                catch (Exception e)
+                {
+                    PrintError($"File Error while Writing to CPL Output File\n{e.Message}");
+                    return; //EXIT
+                }
+
+                PrintInfo("CPL Output File Saved to Ouput Directory");
             }
 
             Console.ReadLine();
@@ -255,15 +315,15 @@ namespace Assemblifier
             Console.WriteLine($"WARNING: {message}");
             if (confirm)
             {
-                Console.WriteLine("Continue? y/n: ");
-                while (true)
-                {
-                    ConsoleKeyInfo consoleKey = Console.ReadKey();
-                    if (consoleKey.KeyChar == 'y') return true;
-                    else if (consoleKey.KeyChar == 'n') return false;
-                }
+                Console.Write("Continue? y/n: ");
+                ConsoleKeyInfo consoleKey = new ConsoleKeyInfo();
+                while (consoleKey.KeyChar != 'y' && consoleKey.KeyChar != 'n') consoleKey = Console.ReadKey();
+
+                Console.WriteLine();
+                if (consoleKey.KeyChar == 'y') return true;
+                else if (consoleKey.KeyChar == 'n') return false;
             }
-            else return true;
+            return true;
         }
 
         /// <summary>

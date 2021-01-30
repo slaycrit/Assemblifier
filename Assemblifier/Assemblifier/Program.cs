@@ -73,7 +73,7 @@ namespace Assemblifier
                     switch (split[0].Substring(1).ToLower())
                     {
                         case "prefix": //Component Name Filter
-                            Prefixes = split[1].Split(',');
+                            Prefixes = split[1].ToLower().Split(',');
                             Console.WriteLine($"ARGS: Prefixes Set ({string.Join(',', Prefixes)})");
                             break;
 
@@ -163,57 +163,7 @@ namespace Assemblifier
                 ws.Range("A1:D1").Style.Fill.BackgroundColor = XLColor.Yellow;
 
                 //Write Parts (By Values)
-                bomStream.Position = 0;
-                StreamReader reader = new StreamReader(bomStream, System.Text.Encoding.UTF8, true);
-
-                int partNumberIndex = -1;
-                int lineCounter = 0;
-                int outputFilePosition = 1;
-                while (!reader.EndOfStream)
-                {
-                    //Read next Entry
-                    string[] attributes = reader.ReadLine().Replace("\"", string.Empty).Split(';');
-                    lineCounter++;
-
-                    if (lineCounter == 1)
-                    {
-                        //CSV Header, Extract Attribute Position
-                        for (int index = 0; index < attributes.Length; index++) 
-                        {
-                            if (attributes[index] == "LCSC")
-                            {
-                                partNumberIndex = index;
-                                break;
-                            }
-                        }
-                        if (partNumberIndex == -1) PrintError("LCSC Part Attribute not found in the BOM");
-                    }
-                    else
-                    {
-                        //Important Fields of the CSV
-                        string value = attributes[1];
-                        string designators = attributes[4];
-                        string footprint = attributes[3];
-                        string partNumber = attributes[partNumberIndex];
-
-                        //Check if Part is contained in the Prefixes Array
-                        bool usePart = false;
-                        if (Prefixes.Length == 0) usePart = true;
-                        else foreach (string prefix in Prefixes) if (designators.StartsWith(prefix)) usePart = true;
-
-                        if (usePart && !string.IsNullOrEmpty(partNumber))
-                        {
-                            //Add the Entry to the Output File
-                            outputFilePosition++;
-                            ws.Cell($"A{outputFilePosition}").Value = value;
-                            ws.Cell($"B{outputFilePosition}").Value = designators;
-                            ws.Cell($"C{outputFilePosition}").Value = footprint;
-                            ws.Cell($"D{outputFilePosition}").Value = partNumber;
-                        }
-                        else if (string.IsNullOrEmpty(partNumber)) PrintWarning($"Designator(s) \"{designators}\" skipped (PartNumber Missing)", true);
-                        else PrintInfo($"Designator(s) \"{designators}\" skipped (not in the Prefix Filtering List)");
-                    }
-                }
+                PopulateBomSheet(ws, bomStream);
 
                 //Visual Flair
                 for (int c = 1; c <= 4; c++) ws.Column(c).Width = 25;
@@ -246,7 +196,6 @@ namespace Assemblifier
 
                 using XLWorkbook wb = new XLWorkbook();
                 IXLWorksheet ws = wb.AddWorksheet("Sheet1");
-                StreamReader reader = new StreamReader(bomStream);
 
                 //Write Header
                 ws.Cell("A1").Value = "Designator";
@@ -257,7 +206,8 @@ namespace Assemblifier
                 ws.Range("A1:E1").Style.Fill.BackgroundColor = XLColor.Yellow;
 
                 //Write Parts (By Designators)
-
+                if(pnpFrontStream != null) PopulatePnPSheet(ws, pnpFrontStream, "T");
+                if(pnpBackStream  != null) PopulatePnPSheet(ws, pnpBackStream , "B");
 
                 //Visual Flair
                 for (int c = 1; c <= 5; c++) ws.Column(c).Width = 25;
@@ -281,6 +231,109 @@ namespace Assemblifier
             }
 
             Console.ReadLine();
+        }
+
+        /// <summary>
+        /// Populates a given Excel Sheet with Data contained in the specified stream
+        /// </summary>
+        /// <param name="ws">The Worksheet to populate</param>
+        /// <param name="stream">Memory Stream containing the Data</param>
+        static void PopulateBomSheet(IXLWorksheet ws, MemoryStream stream)
+        {
+            stream.Position = 0;
+            StreamReader reader = new StreamReader(stream, System.Text.Encoding.UTF8, true);
+
+            int partNumberIndex = -1;
+            int lineCounter = 0;
+            int outputFilePosition = ws.LastRowUsed().RowNumber();
+            while (!reader.EndOfStream)
+            {
+                //Read next Entry
+                string[] attributes = reader.ReadLine().Replace("\"", string.Empty).Split(';');
+                lineCounter++;
+
+                if (lineCounter == 1)
+                {
+                    //CSV Header, Extract Attribute Position
+                    for (int index = 0; index < attributes.Length; index++)
+                    {
+                        if (attributes[index] == "LCSC")
+                        {
+                            partNumberIndex = index;
+                            break;
+                        }
+                    }
+                    if (partNumberIndex == -1) PrintError("LCSC Part Attribute not found in the BOM");
+                }
+                else
+                {
+                    //Important Fields of the CSV
+                    string value = attributes[1];
+                    string designators = attributes[4];
+                    string footprint = attributes[3];
+                    string partNumber = attributes[partNumberIndex];
+
+                    //Check if Part is contained in the Prefixes Array
+                    bool usePart = false;
+                    if (Prefixes.Length == 0) usePart = true;
+                    else foreach (string prefix in Prefixes) if (designators.ToLower().StartsWith(prefix)) usePart = true;
+
+                    if (usePart && !string.IsNullOrEmpty(partNumber))
+                    {
+                        //Add the Entry to the Output File
+                        outputFilePosition++;
+                        ws.Cell($"A{outputFilePosition}").Value = value;
+                        ws.Cell($"B{outputFilePosition}").Value = designators;
+                        ws.Cell($"C{outputFilePosition}").Value = footprint;
+                        ws.Cell($"D{outputFilePosition}").Value = partNumber;
+                    }
+                    else if (string.IsNullOrEmpty(partNumber)) PrintWarning($"Designator(s) \"{designators}\" skipped (PartNumber Missing)", true);
+                    else PrintInfo($"Designator(s) \"{designators}\" skipped (not in the Prefix Filtering List)");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Populates a given Excel Sheet with Data contained in the specified stream
+        /// </summary>
+        /// <param name="ws">The Worksheet to populate</param>
+        /// <param name="stream">Memory Stream containing the Data</param>
+        static void PopulatePnPSheet(IXLWorksheet ws, MemoryStream stream, string layer)
+        {
+            stream.Position = 0;
+            StreamReader reader = new StreamReader(stream, System.Text.Encoding.UTF8, true);
+
+            int lineCounter = 0;
+            int outputFilePosition = ws.LastRowUsed().RowNumber();
+            while (!reader.EndOfStream)
+            {
+                //Read next Entry
+                string[] attributes = reader.ReadLine().Replace(" ", string.Empty).Split(',');
+                lineCounter++;
+
+                //Important Fields of the CSV
+                string designator = attributes[0];
+                string midX = attributes[1];
+                string midY = attributes[2];
+                string rotation = attributes[3];
+
+                //Check if Part is contained in the Prefixes Array
+                bool usePart = false;
+                if (Prefixes.Length == 0) usePart = true;
+                else foreach (string prefix in Prefixes) if (designator.ToLower().StartsWith(prefix)) usePart = true;
+
+                if (usePart)
+                {
+                    //Add the Entry to the Output File
+                    outputFilePosition++;
+                    ws.Cell($"A{outputFilePosition}").Value = designator;
+                    ws.Cell($"B{outputFilePosition}").Value = midX + "mm";
+                    ws.Cell($"C{outputFilePosition}").Value = midY + "mm";
+                    ws.Cell($"D{outputFilePosition}").Value = layer;
+                    ws.Cell($"E{outputFilePosition}").Value = rotation.Split('.')[0];
+                }
+                else PrintInfo($"Part \"{designator}\" skipped (not in the Prefix Filtering List)");
+            }
         }
 
         /// <summary>
